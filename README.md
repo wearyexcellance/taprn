@@ -1,96 +1,71 @@
 # TAP Fitness
 
-A React Native (Expo) fitness app with real-time motion-capture rep
-counting and form correction, built on TensorFlow.js (MoveNet /
-BlazePose).
+React Native (Expo) fitness app with a dark purple/black UI and real-time
+TensorFlow.js MoCap (MoveNet) for camera-based rep counting and form checking.
 
-## Stack
-
-- Expo SDK 51, React Navigation (native-stack)
-- `@tensorflow/tfjs` + `@tensorflow/tfjs-react-native` + `@tensorflow-models/pose-detection`
-- `expo-camera`'s `cameraWithTensors` bridge for a live tensor stream
-- `react-native-svg` for the skeleton overlay and pixel-art avatar (no
-  extra native dependency for drawing)
-- AsyncStorage-backed auth context (swap for Firebase / your REST API)
-
-## Getting started
+## Run it
 
 ```bash
 npm install
-npx expo prebuild   # required once, since tfjs-react-native + expo-camera
-                     # need native modules outside Expo Go
-npx expo run:ios     # or: npx expo run:android
+npx expo start
 ```
 
-> **Expo Go will not work** for the Execution screen — `tfjs-react-native`'s
-> GL backend and the tensor-camera bridge require a custom dev client /
-> prebuilt native project. Everything else (navigation, cards, auth) will
-> run in Expo Go if you want to preview the UI quickly, but wire the app
-> up with `expo run:ios` / `expo run:android` (or EAS Build) before
-> testing MoCap.
+Scan the QR code with Expo Go (iOS/Android), or run `npm run ios` / `npm run android`
+with a simulator. The Execution screen needs a **real device with a camera** —
+TFJS pose inference over expo-camera does not run in the iOS Simulator.
 
-## Project structure
+> This was generated outside a runnable sandbox, so dependency versions
+> (Expo SDK 51, RN 0.74) should be checked against `npx expo install --check`
+> before your first build, and `npx expo doctor` run once to catch any
+> native-module mismatches.
 
-```
-App.js
-src/
-  theme/          color + type tokens (purple/black palette)
-  context/        AuthContext — normalizes user data, kills the "NaN" bug
-  navigation/      stack navigator, auth-gated
-  components/      TapHeader, CategoryCard, BottomTabBar, ProfileBanner,
-                    SkeletonOverlay, PixelAvatar
-  screens/         Login, Home, WorkoutsPro/Express, RoutineDetail,
-                    Execution (camera + MoCap), Settings
-  hooks/
-    usePoseDetection.js   TFJS setup + MoveNet/BlazePose detector
-  utils/
-    poseMath.js     angle = arccos((A·B)/(|A||B|)) + rep-counting state
-                    machine (hysteresis between down/up thresholds)
-    exerciseData.js catalog: categories, exercises, joint triples,
-                    per-exercise angle thresholds
-```
+### Known dependency quirk: `@mediapipe/pose`
 
-## How rep counting works
+`@tensorflow-models/pose-detection` declares a peer dependency on
+`@mediapipe/pose` using a plain semver like `0.5.0`, but Google only ever
+publishes that package under timestamp-style versions (e.g.
+`0.5.1675469404`) — there's no `0.5.0` on the npm registry, so a strict
+install can fail trying to resolve it. This app never actually loads that
+package (every detector here is created with `runtime: 'tfjs'`, not
+`'mediapipe'`), so `package.json` pins it to a real published version via
+`overrides` to satisfy the peer check without pulling in code you don't use.
+If you still hit a resolution error, `npm install --legacy-peer-deps` is a
+safe fallback.
 
-Each exercise defines a `jointTriple` (e.g. hip–knee–ankle for squats)
-and two angle thresholds, `downAngle` / `upAngle`. Every frame:
+## Architecture
 
-1. `usePoseDetection` runs the model on the current camera tensor and
-   returns keypoints keyed by name (`left_knee`, `left_hip`, …).
-2. `angleForExercise` computes the joint angle with the standard
-   `θ = arccos((A·B)/(|A||B|))` formula.
-3. `RepCounter` is a small hysteresis state machine: a rep only
-   completes after the angle has crossed *down past `downAngle`* and
-   then *up past `upAngle`* (not just touched a single line), which is
-   what prevents camera jitter from double-counting reps.
-4. Form validation tracks the minimum angle reached during the "down"
-   phase; if it never got deep/controlled enough (`goodFormMinAngle`),
-   the rep is flagged and the skeleton overlay renders red instead of
-   green for that state.
-
-## The "NaN" username bug
-
-`AuthContext.normalizeUser` is the single place raw auth payloads are
-converted into what the UI reads. Any missing `displayName`, `streak`,
-or `weeklyProgress` field falls back to a sane default instead of
-leaking `undefined`/`NaN` into the profile banner — swap the mocked
-`login()` body for your real Firebase/REST call and the guarantee still
-holds as long as the response passes through `normalizeUser`.
+- `App.js` — wraps navigation in `AuthProvider`.
+- `src/navigation/` — bottom tabs (Pro / Home / Express) nested in a root
+  stack that also holds Routine Detail, Execution, and Settings.
+- `src/context/AuthContext.js` — auth state + history. Ships with a guest
+  login and stubs for a custom REST API and Firebase Auth. This is also
+  where the "NaN username" bug is fixed: `resolveDisplayName()` catches any
+  falsy/NaN display name from the backend and falls back to the email
+  handle or "Athlete" before it ever reaches a screen.
+- `src/utils/angleMath.js` — `theta = arccos((A·B)/(|A||B|))` joint-angle
+  calculation from three keypoints.
+- `src/utils/repCounter.js` — per-exercise angle thresholds and an "up" /
+  "down" state machine that increments reps on the down→up transition and
+  flags good/bad form near the bottom of the movement.
+- `src/utils/usePoseDetection.js` — standalone hook for wiring
+  `@tensorflow-models/pose-detection` (MoveNet or BlazePose) to any frame
+  source; also exports the 17-point skeleton edge list.
+- `src/screens/ExecutionScreen.js` — the MoCap screen: `TensorCamera` from
+  `tfjs-react-native` streams frames straight into MoveNet, keypoints are
+  scaled to screen space, `SkeletonOverlay` draws the bones (green = good
+  form, red = bad form, violet = neutral), and the rep counter renders as
+  `10x4` / `down 0x0` per the spec.
 
 ## Swapping in BlazePose
 
-`usePoseDetection("blazepose")` switches the detector to BlazePose (33
-keypoints) if you want richer torso/face tracking than MoveNet's 17.
-`SKELETON_EDGES` and the exercise `jointTriple`s currently use MoveNet's
-naming (`left_knee`, etc.) — BlazePose uses the same joint names for the
-shared keypoints, so most exercises work unchanged, but you'll want to
-extend `SKELETON_EDGES` if you want to draw BlazePose's extra points.
+`usePoseDetection({ model: 'blazepose' })` and the detector setup in
+`ExecutionScreen.js` both already branch on model name — change
+`SupportedModels.MoveNet` to `SupportedModels.BlazePose` there if you want
+33-point tracking instead of MoveNet's 17.
 
-## Known gaps / next steps
+## Wiring real auth
 
-- Camera is fixed to `front`; add a flip-camera control if needed.
-- `login()` in `AuthContext` is mocked — plug in Firebase Auth or your
-  REST endpoint.
-- Only single-person pose estimation is wired up (MoveNet SinglePose).
-- Photo URLs in `exerciseData.js` are placeholders — swap for your own
-  assets before shipping.
+`AuthContext.loginWithApi()` is stubbed for a REST backend; a commented-out
+`loginWithFirebase()` shows the Firebase Auth equivalent. Replace
+`loginAsGuest()` in `HomeScreen.js` with a real login screen when you're
+ready.

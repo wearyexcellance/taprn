@@ -1,67 +1,50 @@
-import React from "react";
-import Svg, { Circle, Line } from "react-native-svg";
-import { colors } from "../theme/colors";
-import { SKELETON_EDGES } from "../hooks/usePoseDetection";
+import React from 'react';
+import Svg, { Circle, Line } from 'react-native-svg';
+import { colors } from '../theme/colors';
+import { SKELETON_EDGES } from '../utils/usePoseDetection';
 
-const MIN_SCORE = 0.35;
+// Renders 17 (MoveNet) to 33 (BlazePose) keypoint dots and connecting bone
+// lines over the camera feed. Lines turn green/red based on formStatus.
+export default function SkeletonOverlay({ pose, width, height, formStatus = 'neutral' }) {
+  if (!pose?.keypoints?.length) return null;
 
-/**
- * Transparent canvas laid over the camera preview. `keypoints` are in the
- * detector's source-image coordinate space; `scaleX`/`scaleY` map that
- * space onto the rendered preview size.
- */
-export default function SkeletonOverlay({
-  keypointsByName,
-  width,
-  height,
-  scaleX = 1,
-  scaleY = 1,
-  formOk = true,
-}) {
-  if (!keypointsByName) return null;
+  const byName = {};
+  pose.keypoints.forEach((k) => {
+    byName[k.name] = k;
+  });
 
-  const strokeColor = formOk ? colors.formGood : colors.formBad;
+  const boneColor =
+    formStatus === 'good' ? colors.success : formStatus === 'bad' ? colors.danger : colors.primaryBright;
 
   return (
     <Svg
       width={width}
       height={height}
-      style={{ position: "absolute", top: 0, left: 0 }}
+      style={{ position: 'absolute', top: 0, left: 0 }}
       pointerEvents="none"
     >
-      {SKELETON_EDGES.map(([fromName, toName]) => {
-        const from = keypointsByName[fromName];
-        const to = keypointsByName[toName];
-        if (!from || !to) return null;
-        if ((from.score ?? 1) < MIN_SCORE || (to.score ?? 1) < MIN_SCORE) return null;
+      {SKELETON_EDGES.map(([a, b], i) => {
+        const pa = byName[a];
+        const pb = byName[b];
+        if (!pa || !pb || pa.score < 0.3 || pb.score < 0.3) return null;
         return (
           <Line
-            key={`${fromName}-${toName}`}
-            x1={from.x * scaleX}
-            y1={from.y * scaleY}
-            x2={to.x * scaleX}
-            y2={to.y * scaleY}
-            stroke={strokeColor}
+            key={`edge-${i}`}
+            x1={pa.x}
+            y1={pa.y}
+            x2={pb.x}
+            y2={pb.y}
+            stroke={boneColor}
             strokeWidth={4}
             strokeLinecap="round"
-            opacity={0.9}
           />
         );
       })}
-      {Object.entries(keypointsByName).map(([name, kp]) => {
-        if ((kp.score ?? 1) < MIN_SCORE) return null;
-        return (
-          <Circle
-            key={name}
-            cx={kp.x * scaleX}
-            cy={kp.y * scaleY}
-            r={5}
-            fill={colors.glow}
-            stroke={strokeColor}
-            strokeWidth={2}
-          />
-        );
-      })}
+      {pose.keypoints.map((k, i) =>
+        k.score >= 0.3 ? (
+          <Circle key={`kp-${i}`} cx={k.x} cy={k.y} r={5} fill={colors.text} stroke={boneColor} strokeWidth={2} />
+        ) : null
+      )}
     </Svg>
   );
 }

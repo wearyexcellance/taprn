@@ -5,28 +5,26 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
-    "backgroundColor": "#0A0A0F",
+    "backgroundColor": "#0A0612",
     "splash": {
-      "backgroundColor": "#0A0A0F"
+      "backgroundColor": "#0A0612"
     },
     "assetBundlePatterns": ["**/*"],
     "ios": {
       "supportsTablet": false,
       "infoPlist": {
-        "NSCameraUsageDescription": "TAP Fitness uses your camera to track your movement and count reps in real time."
+        "NSCameraUsageDescription": "TAP Fitness uses your camera for real-time MoCap pose tracking and rep counting."
       }
     },
     "android": {
-      "adaptiveIcon": {
-        "backgroundColor": "#0A0A0F"
-      },
-      "permissions": ["CAMERA"]
+      "permissions": ["CAMERA"],
+      "package": "com.tapfitness.app"
     },
     "plugins": [
       [
         "expo-camera",
         {
-          "cameraPermission": "TAP Fitness uses your camera to track your movement and count reps in real time."
+          "cameraPermission": "TAP Fitness uses your camera for real-time MoCap pose tracking and rep counting."
         }
       ]
     ]

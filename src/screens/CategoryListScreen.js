@@ -1,35 +1,68 @@
-import React from "react";
-import { View, ScrollView, StyleSheet } from "react-native";
-import { colors, spacing } from "../theme/colors";
-import TapHeader from "../components/TapHeader";
-import CategoryCard from "../components/CategoryCard";
-import BottomTabBar from "../components/BottomTabBar";
+import React from 'react';
+import { View, Text, Image, StyleSheet, FlatList, Pressable } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
+import { colors, radii, spacing } from '../theme/colors';
 
-// Generic list of dark-photo category cards. Used for both "Workouts Pro"
-// (combat/heavy) and "Workouts Express" (quick routines) — the two only
-// differ in title, catalog, and which tab is highlighted.
-export default function CategoryListScreen({ navigation, title, categories, activeTab }) {
+// One screen powers both "Workouts Pro" and "Workouts Express" — the data
+// and header title are passed in via navigation params.
+export default function CategoryListScreen({ route, navigation }) {
+  const { title, categories } = route.params;
+
   return (
-    <View style={styles.screen}>
-      <TapHeader title={title} />
-      <ScrollView contentContainerStyle={styles.list}>
-        {categories.map((cat) => (
-          <CategoryCard
-            key={cat.id}
-            title={cat.title}
-            photo={cat.photo}
+    <SafeAreaView style={styles.safe} edges={['top']}>
+      <View style={styles.header}>
+        <Pressable onPress={() => navigation.goBack()} hitSlop={10}>
+          <Ionicons name="chevron-back" size={24} color={colors.text} />
+        </Pressable>
+        <Text style={styles.headerTitle}>{title}</Text>
+        <View style={{ width: 24 }} />
+      </View>
+
+      <FlatList
+        data={categories}
+        keyExtractor={(item) => item.id}
+        contentContainerStyle={styles.list}
+        renderItem={({ item }) => (
+          <Pressable
+            style={styles.card}
             onPress={() =>
-              navigation.navigate("RoutineDetail", { categoryId: cat.id, categoryTitle: cat.title })
+              navigation.navigate('RoutineDetail', { categoryId: item.id, title: item.title })
             }
-          />
-        ))}
-      </ScrollView>
-      <BottomTabBar active={activeTab} onNavigate={(route) => navigation.navigate(route)} />
-    </View>
+          >
+            <Image source={{ uri: item.image }} style={styles.image} />
+            <View style={styles.scrim} />
+            <View style={styles.cardContent}>
+              <Text style={styles.tag}>{item.tag?.toUpperCase()}</Text>
+              <Text style={styles.cardTitle}>{item.title}</Text>
+            </View>
+          </Pressable>
+        )}
+      />
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: colors.base },
-  list: { paddingHorizontal: spacing.lg, paddingBottom: 140 },
+  safe: { flex: 1, backgroundColor: colors.bg },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing(5),
+    paddingVertical: spacing(3),
+  },
+  headerTitle: { color: colors.text, fontSize: 18, fontWeight: '800' },
+  list: { paddingHorizontal: spacing(5), paddingBottom: spacing(10) },
+  card: {
+    height: 140,
+    borderRadius: radii.lg,
+    overflow: 'hidden',
+    marginBottom: spacing(4),
+  },
+  image: { ...StyleSheet.absoluteFillObject, width: '100%', height: '100%' },
+  scrim: { ...StyleSheet.absoluteFillObject, backgroundColor: colors.cardScrim },
+  cardContent: { position: 'absolute', left: 16, bottom: 14 },
+  tag: { color: colors.primaryBright, fontSize: 11, fontWeight: '800', letterSpacing: 0.5 },
+  cardTitle: { color: colors.text, fontSize: 20, fontWeight: '800', marginTop: 2 },
 });

@@ -1,46 +1,58 @@
-import React from "react";
-import { View, Text, TouchableOpacity, StyleSheet } from "react-native";
-import { colors, radii, spacing } from "../theme/colors";
-import { type } from "../theme/typography";
-import { useAuth } from "../context/AuthContext";
-import TapHeader from "../components/TapHeader";
+import React from 'react';
+import { View, Text, StyleSheet, Pressable } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
+import { colors, radii, spacing } from '../theme/colors';
+import { useAuth } from '../context/AuthContext';
 
 export default function SettingsScreen({ navigation }) {
   const { user, logout } = useAuth();
 
   return (
-    <View style={styles.screen}>
-      <TapHeader title="Settings" />
-      <View style={styles.content}>
-        <Text style={styles.label}>Signed in as</Text>
-        <Text style={styles.value}>{user?.displayName ?? "Athlete"}</Text>
+    <SafeAreaView style={styles.safe} edges={['top']}>
+      <View style={styles.header}>
+        <Pressable onPress={() => navigation.goBack()} hitSlop={10}>
+          <Ionicons name="chevron-back" size={24} color={colors.text} />
+        </Pressable>
+        <Text style={styles.headerTitle}>Settings</Text>
+        <View style={{ width: 24 }} />
+      </View>
 
-        <TouchableOpacity
+      <View style={styles.body}>
+        <Text style={styles.row}>Signed in as {user?.displayName ?? 'Athlete'}</Text>
+        <Pressable
           style={styles.logoutButton}
           onPress={async () => {
             await logout();
-            navigation.replace("Login");
+            navigation.goBack();
           }}
         >
           <Text style={styles.logoutText}>Log out</Text>
-        </TouchableOpacity>
+        </Pressable>
       </View>
-    </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: colors.base },
-  content: { paddingHorizontal: spacing.lg, marginTop: spacing.lg },
-  label: { ...type.caption, color: colors.textMuted },
-  value: { ...type.h3, color: colors.text, marginTop: 4, marginBottom: spacing.xl },
-  logoutButton: {
-    backgroundColor: colors.card,
-    borderColor: colors.formBad,
-    borderWidth: 1,
-    borderRadius: radii.md,
-    paddingVertical: 14,
-    alignItems: "center",
+  safe: { flex: 1, backgroundColor: colors.bg },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing(5),
+    paddingVertical: spacing(3),
   },
-  logoutText: { ...type.bodySemi, color: colors.formBad },
+  headerTitle: { color: colors.text, fontSize: 18, fontWeight: '800' },
+  body: { paddingHorizontal: spacing(5), paddingTop: spacing(4) },
+  row: { color: colors.textDim, marginBottom: spacing(5) },
+  logoutButton: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    padding: spacing(4),
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+  },
+  logoutText: { color: colors.danger, fontWeight: '700' },
 });

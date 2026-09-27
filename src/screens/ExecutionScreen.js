@@ -1,290 +1,314 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { View, Text, TouchableOpacity, StyleSheet, Dimensions } from "react-native";
-import { Camera } from "expo-camera";
-import * as tf from "@tensorflow/tfjs";
-import { colors, radii, spacing } from "../theme/colors";
-import { type } from "../theme/typography";
-import { TensorCamera, usePoseDetection } from "../hooks/usePoseDetection";
-import SkeletonOverlay from "../components/SkeletonOverlay";
-import PixelAvatar from "../components/PixelAvatar";
-import { angleForExercise, RepCounter } from "../utils/poseMath";
-import { getExerciseById } from "../utils/exerciseData";
-import { useAuth } from "../context/AuthContext";
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { View, Text, StyleSheet, Pressable, Dimensions } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
+import { Camera, CameraType } from 'expo-camera';
+import { GLView } from 'expo-gl';
+import { cameraWithTensors } from '@tensorflow/tfjs-react-native';
+import * as tf from '@tensorflow/tfjs';
+import * as poseDetection from '@tensorflow-models/pose-detection';
 
-const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get("window");
+import { colors, radii, spacing } from '../theme/colors';
+import SkeletonOverlay from '../components/SkeletonOverlay';
+import { createRepCounter, EXERCISES } from '../utils/repCounter';
+import { useAuth } from '../context/AuthContext';
 
-// Tensor camera input resolution — smaller is faster on-device.
+const TensorCamera = cameraWithTensors(Camera);
+const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
+
+// Tensor size fed to the model — smaller = faster on-device inference.
 const TENSOR_WIDTH = 152;
 const TENSOR_HEIGHT = 200;
 
 export default function ExecutionScreen({ route, navigation }) {
-  const { exerciseId } = route.params;
-  const exercise = useMemo(() => getExerciseById(exerciseId), [exerciseId]);
-  const { recordCompletedExercise } = useAuth();
+  const { exercise } = route.params; // { id, name, exerciseKey, targetReps }
+  const { logCompletedExercise } = useAuth();
 
   const [hasPermission, setHasPermission] = useState(null);
-  const [controlsOpen, setControlsOpen] = useState(true);
-  const [keypointsByName, setKeypointsByName] = useState(null);
-  const [liveAngle, setLiveAngle] = useState(null);
-  const [formOk, setFormOk] = useState(true);
-  const [repState, setRepState] = useState("up");
-  const [repsSets, setRepsSets] = useState({ reps: 0, sets: 0 });
-  const [startedAt] = useState(() => Date.now());
+  const [showControls, setShowControls] = useState(true);
+  const [pose, setPose] = useState(null);
+  const [modelReady, setModelReady] = useState(false);
 
+  const detectorRef = useRef(null);
+  const repCounterRef = useRef(createRepCounter(exercise.exerciseKey, { repsPerSet: exercise.targetReps }));
   const rafId = useRef(null);
-  const { isReady, estimatePose } = usePoseDetection("lightning");
-
-  const repCounter = useMemo(() => {
-    if (!exercise) return null;
-    return new RepCounter({
-      downAngle: exercise.downAngle,
-      upAngle: exercise.upAngle,
-      goodFormMinAngle: exercise.goodFormMinAngle,
-      onRep: ({ reps }) => {
-        // Auto-advance to the next set once the target rep count is hit.
-        if (reps >= exercise.targetReps) {
-          repCounter.nextSet();
-        }
-      },
-    });
-  }, [exercise]);
+  const [counterText, setCounterText] = useState('down 0x0');
+  const [formStatus, setFormStatus] = useState('neutral');
 
   useEffect(() => {
     (async () => {
       const { status } = await Camera.requestCameraPermissionsAsync();
-      setHasPermission(status === "granted");
+      setHasPermission(status === 'granted');
+    })();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      await tf.ready();
+      const detector = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, {
+        modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
+      });
+      if (!cancelled) {
+        detectorRef.current = detector;
+        setModelReady(true);
+      }
     })();
     return () => {
+      cancelled = true;
+      detectorRef.current?.dispose?.();
       if (rafId.current) cancelAnimationFrame(rafId.current);
     };
   }, []);
 
-  const handleCameraStream = (imageTensorStream) => {
+  // Called by TensorCamera for every frame; runs pose estimation and updates
+  // the rep-counting state machine + skeleton overlay colors.
+  const handleCameraStream = useCallback((imageTensorStream) => {
     const loop = async () => {
-      const nextTensor = imageTensorStream.next().value;
-      if (nextTensor && isReady && repCounter) {
-        const result = await estimatePose(nextTensor);
-        if (result) {
-          setKeypointsByName(result.keypointsByName);
-          const angle = angleForExercise(result.keypointsByName, exercise.jointTriple);
-          setLiveAngle(angle);
-          setFormOk(repCounter.liveFormOk(angle));
-          const snap = repCounter.update(angle);
-          setRepState(snap.state);
-          setRepsSets({ reps: snap.reps, sets: snap.sets });
+      const imageTensor = imageTensorStream.next().value;
+      if (imageTensor && detectorRef.current) {
+        try {
+          const poses = await detectorRef.current.estimatePoses(imageTensor, { flipHorizontal: false });
+          if (poses?.length) {
+            const scaled = scalePoseToScreen(poses[0], TENSOR_WIDTH, TENSOR_HEIGHT, SCREEN_W, SCREEN_H);
+            setPose(scaled);
+
+            const next = repCounterRef.current.update(scaled);
+            setCounterText(repCounterRef.current.getDisplayCounter());
+            setFormStatus(next.formStatus);
+          }
+        } catch (e) {
+          // swallow occasional inference errors, keep the loop alive
         }
-        tf.dispose(nextTensor);
+        tf.dispose(imageTensor);
       }
       rafId.current = requestAnimationFrame(loop);
     };
     loop();
-  };
+  }, []);
 
-  const handleComplete = async () => {
-    if (rafId.current) cancelAnimationFrame(rafId.current);
-    const durationSec = Math.round((Date.now() - startedAt) / 1000);
-    await recordCompletedExercise({
-      exerciseId: exercise.id,
+  const handleComplete = useCallback(async () => {
+    const state = repCounterRef.current.getState();
+    await logCompletedExercise({
       exerciseName: exercise.name,
-      reps: repsSets.reps,
-      sets: repsSets.sets,
-      durationSec,
+      reps: state.reps,
+      sets: state.sets,
+      goodFormPct: state.formStatus === 'good' ? 100 : 70,
     });
     navigation.goBack();
-  };
+  }, [exercise.name, logCompletedExercise, navigation]);
 
-  if (!exercise) {
+  if (hasPermission === null || !modelReady) {
     return (
-      <View style={styles.center}>
-        <Text style={styles.permissionText}>Exercise not found.</Text>
-      </View>
+      <SafeAreaView style={[styles.safe, styles.center]}>
+        <Text style={styles.loadingText}>Loading MoCap engine…</Text>
+      </SafeAreaView>
     );
   }
 
-  if (hasPermission === null) {
-    return (
-      <View style={styles.center}>
-        <Text style={styles.permissionText}>Requesting camera access…</Text>
-      </View>
-    );
-  }
   if (hasPermission === false) {
     return (
-      <View style={styles.center}>
-        <Text style={styles.permissionText}>
-          Camera access is required to track your reps. Enable it in Settings.
-        </Text>
-      </View>
+      <SafeAreaView style={[styles.safe, styles.center]}>
+        <Text style={styles.loadingText}>Camera access is required for MoCap tracking.</Text>
+        <Pressable style={styles.permButton} onPress={() => navigation.goBack()}>
+          <Text style={styles.permButtonText}>Go back</Text>
+        </Pressable>
+      </SafeAreaView>
     );
   }
 
+  const config = EXERCISES[exercise.exerciseKey];
+  const avatarState = repCounterRef.current.getState().phase; // 'up' | 'down'
+
   return (
-    <View style={styles.screen}>
+    <View style={styles.container}>
       <TensorCamera
-        style={StyleSheet.absoluteFill}
-        type={Camera.Constants.Type.front}
-        cameraTextureWidth={SCREEN_W}
-        cameraTextureHeight={SCREEN_H}
+        style={StyleSheet.absoluteFillObject}
+        type={CameraType.front}
+        cameraTextureWidth={TENSOR_WIDTH}
+        cameraTextureHeight={TENSOR_HEIGHT}
         resizeWidth={TENSOR_WIDTH}
         resizeHeight={TENSOR_HEIGHT}
         resizeDepth={3}
         onReady={handleCameraStream}
-        autorender={true}
+        autorender
         useCustomShadersToResize={false}
       />
 
-      <SkeletonOverlay
-        keypointsByName={keypointsByName}
-        width={SCREEN_W}
-        height={SCREEN_H}
-        scaleX={SCREEN_W / TENSOR_WIDTH}
-        scaleY={SCREEN_H / TENSOR_HEIGHT}
-        formOk={formOk}
-      />
+      <SkeletonOverlay pose={pose} width={SCREEN_W} height={SCREEN_H} formStatus={formStatus} />
 
-      {/* Top controls toggle */}
-      <View style={styles.topBar}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconButton}>
-          <Text style={styles.iconButtonText}>‹</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          onPress={() => setControlsOpen((v) => !v)}
-          style={styles.controlsToggle}
-        >
-          <Text style={styles.controlsToggleText}>
-            {controlsOpen ? "Close Controls" : "Open Controls"}
-          </Text>
-        </TouchableOpacity>
-      </View>
+      <SafeAreaView style={styles.overlayUI} edges={['top', 'bottom']}>
+        <View style={styles.topBar}>
+          <Pressable style={styles.iconButton} onPress={() => navigation.goBack()}>
+            <Ionicons name="chevron-back" size={22} color={colors.text} />
+          </Pressable>
+          <Text style={styles.exerciseTitle}>{exercise.name}</Text>
+          <Pressable style={styles.iconButton} onPress={() => setShowControls((s) => !s)}>
+            <Ionicons name={showControls ? 'options' : 'options-outline'} size={20} color={colors.text} />
+          </Pressable>
+        </View>
 
-      {controlsOpen && (
-        <View style={styles.controlsPanel}>
-          <Text style={styles.exerciseName}>{exercise.name}</Text>
-          <Text style={styles.stateLabel}>
-            {repState === "down" ? "down" : "up"} {repsSets.reps}x{repsSets.sets}
-          </Text>
-          {!isReady && <Text style={styles.loadingText}>Loading pose model…</Text>}
-          {liveAngle != null && (
-            <Text style={styles.angleText}>Angle: {Math.round(liveAngle)}°</Text>
-          )}
-          <View style={styles.avatarWrap}>
-            <PixelAvatar state={repState} size={72} />
+        {showControls && (
+          <View style={styles.controlsPanel}>
+            <Text style={styles.controlsLabel}>Open Controls</Text>
+            <Text style={styles.hint}>Target: {exercise.targetReps} reps/set</Text>
+            <View style={[styles.formBadge, formStatus === 'good' && styles.formGood, formStatus === 'bad' && styles.formBad]}>
+              <Text style={styles.formBadgeText}>
+                {formStatus === 'good' ? 'Good form' : formStatus === 'bad' ? 'Fix your form' : 'Tracking…'}
+              </Text>
+            </View>
+          </View>
+        )}
+
+        <View style={styles.pixelAvatarWrap}>
+          <View style={[styles.pixelAvatar, avatarState === 'down' && styles.pixelAvatarDown]}>
+            <Ionicons
+              name={avatarState === 'down' ? 'body' : 'walk'}
+              size={28}
+              color={colors.bg}
+            />
           </View>
         </View>
-      )}
 
-      {/* Bottom control bar */}
-      <View style={styles.bottomBar}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.bottomIcon}>
-          <Text style={styles.bottomIconText}>‹</Text>
-        </TouchableOpacity>
-
-        <View style={styles.counterWrap}>
-          <Text style={styles.counterText}>
-            {repsSets.reps}x{repsSets.sets}
-          </Text>
-          <Text style={styles.counterTarget}>
-            target {exercise.targetReps}x{exercise.targetSets}
-          </Text>
+        <View style={styles.counterCard}>
+          <Text style={styles.counterLabel}>{config?.label ?? exercise.name}</Text>
+          <Text style={styles.counterValue}>{counterText}</Text>
         </View>
 
-        <TouchableOpacity onPress={handleComplete} style={styles.completeButton}>
-          <Text style={styles.completeButtonText}>✓</Text>
-        </TouchableOpacity>
-      </View>
+        <View style={styles.bottomBar}>
+          <Pressable style={styles.bottomIcon} onPress={() => navigation.goBack()}>
+            <Ionicons name="close" size={22} color={colors.text} />
+          </Pressable>
+          <View style={styles.bottomStats}>
+            <Text style={styles.bottomStatsText}>{counterText}</Text>
+          </View>
+          <Pressable style={styles.completeButton} onPress={handleComplete}>
+            <Ionicons name="checkmark" size={24} color={colors.bg} />
+          </Pressable>
+        </View>
+      </SafeAreaView>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: colors.base },
-  center: {
-    flex: 1,
-    backgroundColor: colors.base,
-    alignItems: "center",
-    justifyContent: "center",
-    padding: spacing.xl,
-  },
-  permissionText: { ...type.body, color: colors.textMuted, textAlign: "center" },
+// MoveNet returns keypoints in the tensor's coordinate space; map them to
+// screen pixels so the overlay lines up with the visible camera feed.
+function scalePoseToScreen(pose, tensorW, tensorH, screenW, screenH) {
+  const scaleX = screenW / tensorW;
+  const scaleY = screenH / tensorH;
+  return {
+    ...pose,
+    keypoints: pose.keypoints.map((k) => ({ ...k, x: k.x * scaleX, y: k.y * scaleY })),
+  };
+}
 
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.bg },
+  safe: { flex: 1, backgroundColor: colors.bg },
+  center: { alignItems: 'center', justifyContent: 'center', padding: spacing(6) },
+  loadingText: { color: colors.textDim, textAlign: 'center' },
+  permButton: {
+    marginTop: spacing(4),
+    backgroundColor: colors.primary,
+    paddingHorizontal: spacing(6),
+    paddingVertical: spacing(3),
+    borderRadius: radii.pill,
+  },
+  permButtonText: { color: colors.bg, fontWeight: '800' },
+
+  overlayUI: { flex: 1, justifyContent: 'space-between' },
   topBar: {
-    position: "absolute",
-    top: 50,
-    left: spacing.lg,
-    right: spacing.lg,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing(4),
+    paddingTop: spacing(2),
   },
   iconButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: "rgba(29,25,41,0.8)",
-    alignItems: "center",
-    justifyContent: "center",
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: colors.overlayScrim,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  iconButtonText: { color: colors.text, fontSize: 22 },
-  controlsToggle: {
-    backgroundColor: "rgba(29,25,41,0.8)",
-    borderRadius: radii.pill,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 10,
-    borderWidth: 1,
-    borderColor: colors.cardBorder,
-  },
-  controlsToggleText: { ...type.caption, color: colors.glow },
+  exerciseTitle: { color: colors.text, fontWeight: '800', fontSize: 16 },
 
   controlsPanel: {
-    position: "absolute",
-    top: 110,
-    left: spacing.lg,
-    right: spacing.lg,
-    backgroundColor: "rgba(19,16,25,0.85)",
-    borderRadius: radii.lg,
+    marginHorizontal: spacing(4),
+    marginTop: spacing(3),
+    backgroundColor: colors.overlayScrim,
+    borderRadius: radii.md,
+    padding: spacing(4),
     borderWidth: 1,
-    borderColor: colors.cardBorder,
-    padding: spacing.md,
+    borderColor: colors.border,
   },
-  exerciseName: { ...type.h3, color: colors.text },
-  stateLabel: { ...type.counter, color: colors.primary, marginTop: spacing.xs },
-  loadingText: { ...type.caption, color: colors.textMuted, marginTop: spacing.xs },
-  angleText: { ...type.caption, color: colors.textMuted, marginTop: 2 },
-  avatarWrap: { position: "absolute", right: spacing.md, top: spacing.md },
+  controlsLabel: { color: colors.primaryBright, fontWeight: '800', fontSize: 12 },
+  hint: { color: colors.textDim, fontSize: 12, marginTop: 4 },
+  formBadge: {
+    marginTop: 10,
+    alignSelf: 'flex-start',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: radii.pill,
+    backgroundColor: colors.surfaceRaised,
+  },
+  formGood: { backgroundColor: 'rgba(34,211,165,0.2)' },
+  formBad: { backgroundColor: 'rgba(255,77,109,0.2)' },
+  formBadgeText: { color: colors.text, fontSize: 11, fontWeight: '700' },
+
+  pixelAvatarWrap: { alignItems: 'center' },
+  pixelAvatar: {
+    width: 56,
+    height: 56,
+    borderRadius: 14,
+    backgroundColor: colors.primaryBright,
+    alignItems: 'center',
+    justifyContent: 'center',
+    transform: [{ translateY: 0 }],
+  },
+  pixelAvatarDown: { backgroundColor: colors.accent, transform: [{ translateY: 8 }] },
+
+  counterCard: {
+    alignSelf: 'center',
+    backgroundColor: colors.overlayScrim,
+    borderRadius: radii.lg,
+    paddingHorizontal: spacing(6),
+    paddingVertical: spacing(3),
+    alignItems: 'center',
+    marginBottom: spacing(3),
+  },
+  counterLabel: { color: colors.textDim, fontSize: 12, fontWeight: '600' },
+  counterValue: { color: colors.text, fontSize: 28, fontWeight: '900', marginTop: 2 },
 
   bottomBar: {
-    position: "absolute",
-    bottom: 30,
-    left: spacing.lg,
-    right: spacing.lg,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    backgroundColor: colors.card,
-    borderRadius: radii.pill,
-    borderWidth: 1,
-    borderColor: colors.cardBorder,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing(6),
+    paddingBottom: spacing(4),
   },
   bottomIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    alignItems: "center",
-    justifyContent: "center",
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: colors.overlayScrim,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  bottomIconText: { color: colors.textMuted, fontSize: 22 },
-  counterWrap: { alignItems: "center" },
-  counterText: { ...type.h3, color: colors.text },
-  counterTarget: { ...type.caption, color: colors.textMuted },
+  bottomStats: {
+    backgroundColor: colors.overlayScrim,
+    paddingHorizontal: spacing(5),
+    paddingVertical: spacing(2),
+    borderRadius: radii.pill,
+  },
+  bottomStatsText: { color: colors.text, fontWeight: '800' },
   completeButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: colors.formGood,
-    alignItems: "center",
-    justifyContent: "center",
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: colors.success,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  completeButtonText: { ...type.h3, color: colors.base },
 });
